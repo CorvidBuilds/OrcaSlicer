@@ -53,10 +53,10 @@ protected:
     float _layer_angle(size_t idx) const override { return float(M_PI/3.) * (idx % 3); }
 };
 
-// Decorative top/bottom hexagon mesh: pointy-top honeycomb walls, unfilled cell
-// whose long diagonal is 5 line spacings. Same zigzag as FillHoneycomb, but the
-// cell size is locked to that hole (not density-packed) and the pattern does not
-// rotate per layer.
+// Decorative top/bottom hexagon mesh: one closed pointy-top loop per cell. Neighbouring
+// loops are spaced so their walls sit one line-width apart (two touching beads, never a
+// shared centerline). The unfilled long diagonal inside each cell is 5 line spacings.
+// The pattern does not rotate per layer.
 class FillHexagon : public Fill
 {
 public:

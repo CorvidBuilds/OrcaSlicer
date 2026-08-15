@@ -94,48 +94,64 @@ void FillHexagon::_fill_surface_single(
 {
     // u is the distance between neighbouring lines. The unfilled long diagonal is 5u;
     // the path is offset outward by half a line-width along the vertex (0.5 / cos(30°) = 1/√3).
-    const double  u          = scale_(this->spacing) / double(params.density);
-    const double  R          = u * (2.5 + 1. / std::sqrt(3.));
-    const coord_t hex_side   = coord_t(std::round(R));
-    const coord_t distance   = coord_t(std::round(R * std::sqrt(3.) / 2.));
-    const coord_t hex_width  = distance * 2;
-    const coord_t y_short    = coord_t(std::round(R / 2.));
-    const coord_t pattern_h  = hex_side * 3;
-    const Point   hex_center(hex_width / 2, hex_side);
+    const double u = scale_(this->spacing) / double(params.density);
+    const double R = u * (2.5 + 1. / std::sqrt(3.));
+    // Neighbours sit far enough apart that facing walls are one line-width apart — two
+    // touching beads instead of a shared centerline, so every wall is thick and every
+    // path can close without revisiting a junction.
+    const double  D          = R * std::sqrt(3.) + u;
+    const coord_t pitch_x    = coord_t(std::round(D));
+    const coord_t pitch_y    = coord_t(std::round(D * std::sqrt(3.) / 2.));
+    const coord_t half_pitch = pitch_x / 2;
+    const Point   hex_center(pitch_x / 2, pitch_y);
 
     BoundingBox bounding_box = expolygon.contour.bounding_box();
     {
         Polygon bb_polygon = bounding_box.polygon();
         bb_polygon.rotate(direction.first, hex_center);
         bounding_box = bb_polygon.bounding_box();
-        bounding_box.offset(hex_width);
-        bounding_box.merge(align_to_grid(bounding_box.min, Point(hex_width, pattern_h)));
+        bounding_box.offset(coord_t(std::round(R * 2.)));
+        // Odd rows are staggered by half a cell, so the lattice repeats every two rows.
+        bounding_box.merge(align_to_grid(bounding_box.min, Point(pitch_x, pitch_y * 2)));
     }
 
+    const double half_w = R * std::sqrt(3.) / 2.;
+    const double half_h = R / 2.;
+
     Polylines all_polylines;
-    coord_t   x = bounding_box.min(0);
-    while (x <= bounding_box.max(0)) {
-        Polyline p;
-        coord_t  ax[2] = { x, x + distance };
-        for (size_t i = 0; i < 2; ++ i) {
-            std::reverse(p.points.begin(), p.points.end());
-            for (coord_t y = bounding_box.min(1); y <= bounding_box.max(1); y += y_short + hex_side + y_short + hex_side) {
-                p.points.push_back(Point(ax[1], y));
-                p.points.push_back(Point(ax[0], y + y_short));
-                p.points.push_back(Point(ax[0], y + y_short + hex_side));
-                p.points.push_back(Point(ax[1], y + y_short + hex_side + y_short));
-                p.points.push_back(Point(ax[1], y + y_short + hex_side + y_short + hex_side));
-            }
-            ax[0] += distance;
-            ax[1] += distance;
-            std::swap(ax[0], ax[1]);
-            x += distance;
+    size_t    row = 0;
+    for (coord_t cy = bounding_box.min(1); cy <= bounding_box.max(1); cy += pitch_y, ++ row) {
+        for (coord_t cx = bounding_box.min(0) + ((row & 1) ? half_pitch : 0); cx <= bounding_box.max(0); cx += pitch_x) {
+            // Pointy-top hex, CCW from the top vertex.
+            Polygon hex;
+            hex.points.reserve(6);
+            hex.points.emplace_back(cx,                            cy + coord_t(std::round(R)));
+            hex.points.emplace_back(cx + coord_t(std::round(half_w)), cy + coord_t(std::round(half_h)));
+            hex.points.emplace_back(cx + coord_t(std::round(half_w)), cy - coord_t(std::round(half_h)));
+            hex.points.emplace_back(cx,                            cy - coord_t(std::round(R)));
+            hex.points.emplace_back(cx - coord_t(std::round(half_w)), cy - coord_t(std::round(half_h)));
+            hex.points.emplace_back(cx - coord_t(std::round(half_w)), cy + coord_t(std::round(half_h)));
+            Polyline p = hex.split_at_first_point();
+            p.rotate(-direction.first, hex_center);
+            all_polylines.push_back(std::move(p));
         }
-        p.rotate(-direction.first, hex_center);
-        all_polylines.push_back(std::move(p));
     }
 
     all_polylines = intersection_pl(std::move(all_polylines), expolygon);
+
+    // Same seam treatment as Concentric: leave a gap so the nozzle does not land back on
+    // the start of the loop. Clipped boundary arcs stay open for connect_infill.
+    size_t j = 0;
+    for (size_t i = 0; i < all_polylines.size(); ++ i) {
+        all_polylines[i].clip_end(this->loop_clipping);
+        if (all_polylines[i].is_valid()) {
+            if (j < i)
+                all_polylines[j] = std::move(all_polylines[i]);
+            ++ j;
+        }
+    }
+    all_polylines.erase(all_polylines.begin() + j, all_polylines.end());
+
     chain_or_connect_infill(std::move(all_polylines), expolygon, polylines_out, this->spacing, params);
 }
 

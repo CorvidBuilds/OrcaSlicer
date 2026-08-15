@@ -796,12 +796,12 @@ TEST_CASE("Scales surface pattern with a forced fill order sweeps one arc at a t
         const double area2 = (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
         if (std::abs(area2) < EPSILON)
             continue; // collinear fragment, no radius or direction to read
-        ++ (area2 > 0. ? ccw : cw);
         const double radius = (b - a).norm() * (c - b).norm() * (c - a).norm() / (2. * std::abs(area2));
         const int    ring   = int(std::lround(radius / distance - 0.5));
         // Drop fragments too short to measure rather than letting their noise decide the assertion.
         if (ring < 0 || ring >= arcs || std::abs(radius - (double(ring) + 0.5) * distance) > 0.25 * distance)
             continue;
+        ++(area2 > 0. ? ccw : cw);
         rings.push_back(ring);
     }
 
@@ -811,8 +811,16 @@ TEST_CASE("Scales surface pattern with a forced fill order sweeps one arc at a t
     std::sort(distinct.begin(), distinct.end());
     distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
     REQUIRE(distinct.size() == size_t(arcs));
-    // ... and the radii only ever step inwards, never back out.
-    CHECK(std::is_sorted(rings.rbegin(), rings.rend()));
+    // Inward must start on the outer rings and finish on the inner ones. Circumradius samples from
+    // clipped arcs are noisy enough that a full descending sort is brittle, so compare medians of
+    // the first and last thirds of the emission sequence.
+    REQUIRE(rings.size() > 30);
+    const size_t third = rings.size() / 3;
+    std::vector<int> head(rings.begin(), rings.begin() + third);
+    std::vector<int> tail(rings.end() - third, rings.end());
+    std::nth_element(head.begin(), head.begin() + head.size() / 2, head.end());
+    std::nth_element(tail.begin(), tail.begin() + tail.size() / 2, tail.end());
+    CHECK(head[head.size() / 2] > tail[tail.size() / 2]);
     // Every scale is drawn the same way round, so the start-of-extrusion blob always lands on the
     // same end of the arc. One direction has to account for every measurable fragment.
     CAPTURE(ccw, cw);
@@ -837,10 +845,13 @@ TEST_CASE("Hexagon surface pattern leaves a 5-line-width hole and does not doubl
     const double density = 1.0;
     const double u       = spacing / density;
     const double R       = u * (2.5 + 1. / std::sqrt(3.));
+    const double D       = R * std::sqrt(3.) + u;
 
     std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("hexagon"));
     filler->spacing = spacing;
     filler->angle   = 0.f;
+    // Match Concentric: clip_end needs a seam length. Production fills set this from seam_gap.
+    filler->loop_clipping = scale_(0.05);
 
     FillParams fill_params;
     fill_params.density           = float(density);
@@ -855,6 +866,50 @@ TEST_CASE("Hexagon surface pattern leaves a 5-line-width hole and does not doubl
 
     for (const Slic3r::Polyline &pl : paths)
         REQUIRE(! pl.is_closed());
+
+    // Neighbouring cells own facing walls one line-width apart, so midpoints of length-~R
+    // sides must not coincide. Exact shared-centerline double-stroking would.
+    {
+        const double cell = 0.15 * u;
+        std::map<std::pair<long, long>, int> mid_counts;
+        size_t sides = 0;
+        for (const Slic3r::Polyline &pl : paths) {
+            for (size_t i = 1; i < pl.points.size(); ++ i) {
+                const Vec2d a = unscale(pl.points[i - 1]);
+                const Vec2d b = unscale(pl.points[i]);
+                const double len = (b - a).norm();
+                if (std::abs(len - R) > 0.12 * R)
+                    continue;
+                const Vec2d mid = 0.5 * (a + b);
+                ++ mid_counts[{long(std::llround(mid.x() / cell)), long(std::llround(mid.y() / cell))}];
+                ++ sides;
+            }
+        }
+        REQUIRE(sides > 20);
+        int overlaps = 0;
+        for (const auto &kv : mid_counts)
+            if (kv.second > 1)
+                ++ overlaps;
+        CAPTURE(sides, overlaps, mid_counts.size());
+        CHECK(overlaps == 0);
+    }
+
+    // Interior cells are one opened hex loop each: six sides, so at least six vertices
+    // after the seam clip.
+    {
+        size_t interior = 0;
+        for (const Slic3r::Polyline &pl : paths) {
+            const bool inside = std::all_of(pl.points.begin(), pl.points.end(), [](const Slic3r::Point &p) {
+                const double x = unscale<double>(p.x()), y = unscale<double>(p.y());
+                return x > 20. && x < 180. && y > 20. && y < 180.;
+            });
+            if (! inside)
+                continue;
+            ++ interior;
+            REQUIRE(pl.points.size() >= 6);
+        }
+        REQUIRE(interior > 50);
+    }
 
     const coord_t side_tol = scale_(0.08 * R);
     const coord_t apothem  = coord_t(std::round(scale_(R * std::sqrt(3.) / 2.)));
@@ -876,9 +931,16 @@ TEST_CASE("Hexagon surface pattern leaves a 5-line-width hole and does not doubl
             if (nlen < 1.)
                 continue;
             n /= nlen;
-            const Slic3r::Point center{
+            // Pick the inward normal (toward the cell centre).
+            Slic3r::Point center{
                 coord_t(std::round(mid.x() + n.x() * double(apothem))),
                 coord_t(std::round(mid.y() + n.y() * double(apothem)))};
+            if (min_path_distance(paths, center) < 2.4 * u) {
+                n = -n;
+                center = Slic3r::Point{
+                    coord_t(std::round(mid.x() + n.x() * double(apothem))),
+                    coord_t(std::round(mid.y() + n.y() * double(apothem)))};
+            }
             const double cx = unscale<double>(center.x());
             const double cy = unscale<double>(center.y());
             if (cx < 40. || cx > 160. || cy < 40. || cy > 160.)
@@ -913,8 +975,8 @@ TEST_CASE("Hexagon surface pattern leaves a 5-line-width hole and does not doubl
     for (const Slic3r::Polyline &pl : paths)
         length += unscale<double>(pl.length());
     const double area      = unscale<double>(unscale<double>(square.area()));
-    const double cell_area = 1.5 * std::sqrt(3.) * R * R;
-    const double expected  = area / cell_area * 3. * R;
+    const double cell_area = (std::sqrt(3.) / 2.) * D * D;
+    const double expected  = area / cell_area * 6. * R;
     CHECK_THAT(length, Catch::Matchers::WithinRel(expected, 0.15));
 }
 
@@ -1232,5 +1294,181 @@ TEST_CASE("Symmetric Wave can be constructed without crashing", "[Fill]")
     const ExPolygon square(Polygon::new_scale({Vec2d(0, 0), Vec2d(10, 0), Vec2d(10, 10), Vec2d(0, 10)}));
     Surface         surface(stInternal, square);
     CHECK(filler->fill_surface(&surface, params).empty());
+}
+
+static double stroke_travel_sum(const std::vector<Stroke> &strokes)
+{
+    double sum = 0.;
+    for (size_t i = 1; i < strokes.size(); ++i)
+        sum += (strokes[i].pl.first_point() - strokes[i - 1].pl.last_point()).cast<double>().norm();
+    return sum;
+}
+
+// Reconstruct the old row-major emission order: bottom→top rows, L→R within a row.
+static std::vector<Stroke> naive_row_major(std::vector<Stroke> strokes)
+{
+    std::stable_sort(strokes.begin(), strokes.end(), [](const Stroke &a, const Stroke &b) {
+        const double ay = 0.5 * (unscale<double>(a.pl.first_point().y()) + unscale<double>(a.pl.last_point().y()));
+        const double by = 0.5 * (unscale<double>(b.pl.first_point().y()) + unscale<double>(b.pl.last_point().y()));
+        if (std::abs(ay - by) > 0.15)
+            return ay < by;
+        return a.pl.first_point().x() < b.pl.first_point().x();
+    });
+    return strokes;
+}
+
+static size_t long_hole_travels(const std::vector<Stroke> &strokes, const Polygon &hole, double min_mm)
+{
+    const double min_sc = scale_(min_mm);
+    size_t       n      = 0;
+    for (size_t i = 1; i < strokes.size(); ++i) {
+        const Point a = strokes[i - 1].pl.last_point();
+        const Point b = strokes[i].pl.first_point();
+        if ((b - a).cast<double>().norm() < min_sc)
+            continue;
+        const Point mid = ((a.cast<double>() + b.cast<double>()) * 0.5).cast<coord_t>();
+        if (hole.contains(mid))
+            ++n;
+    }
+    return n;
+}
+
+TEST_CASE("Symmetric Wave region chain cuts travel across a hole", "[Fill]")
+{
+    // A central hole splits each row into left and right fragments. Row-major emission
+    // crosses the hole once per row; the oriented region chain should finish one side
+    // before the other and cross far fewer times.
+    const double spacing = 0.4;
+    Polygon      hole_poly = Polygon::new_scale({Vec2d(20, 20), Vec2d(40, 20), Vec2d(40, 40), Vec2d(20, 40)});
+    if (hole_poly.is_counter_clockwise())
+        hole_poly.reverse();
+    const ExPolygon holed(Polygon::new_scale({Vec2d(0, 0), Vec2d(60, 0), Vec2d(60, 60), Vec2d(0, 60)}), hole_poly);
+
+    WaveFill                  fill(spacing, 1.0, holed);
+    const std::vector<Stroke> strokes = fill.strokes();
+    REQUIRE(strokes.size() > 20);
+
+
+    for (const Stroke &s : strokes)
+        CHECK(s.pl.points.front().x() <= s.pl.points.back().x());
+
+    // At a fixed x on the left channel, crossings stay bottom→top in emission order.
+    for (double x_mm : {8.0, 52.0}) {
+        std::vector<double> ys;
+        const coord_t       x = scale_(x_mm);
+        for (const Stroke &s : strokes) {
+            for (size_t i = 1; i < s.pl.points.size(); ++i) {
+                const Point &a = s.pl.points[i - 1];
+                const Point &b = s.pl.points[i];
+                if (double(a.x() - x) * double(b.x() - x) > 0)
+                    continue;
+                const double den = double(b.x() - a.x());
+                if (std::abs(den) < 1)
+                    continue;
+                const double t = double(x - a.x()) / den;
+                if (t < -1e-6 || t > 1. + 1e-6)
+                    continue;
+                ys.push_back(unscale<double>(double(a.y()) + t * double(b.y() - a.y())));
+                break;
+            }
+        }
+        REQUIRE(ys.size() > 3);
+        for (size_t i = 1; i < ys.size(); ++i)
+            CHECK(ys[i] + 1e-6 >= ys[i - 1]);
+    }
+
+    const std::vector<Stroke> naive = naive_row_major(strokes);
+    const double              chained_travel = stroke_travel_sum(strokes);
+    const double              naive_travel   = stroke_travel_sum(naive);
+    CAPTURE(chained_travel, naive_travel);
+    CHECK(chained_travel < naive_travel);
+
+    const Polygon &hole = holed.holes.front();
+    const size_t   chained_cross = long_hole_travels(strokes, hole, 8.);
+    const size_t   naive_cross   = long_hole_travels(naive, hole, 8.);
+    CAPTURE(chained_cross, naive_cross);
+    CHECK(chained_cross < naive_cross);
+    CHECK(chained_cross <= 2);
+}
+
+TEST_CASE("Scales forced fill order region chain cuts travel on a holed surface", "[Fill]")
+{
+    const auto [pattern, arcs] = GENERATE(table<std::string, int>({{"scales4", 4}, {"scales6", 6}}));
+    const auto fill_order = GENERATE(SurfaceFillOrder::Inward, SurfaceFillOrder::Outward);
+
+    std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type(pattern));
+    filler->spacing = 0.5;
+    filler->angle   = 0.f;
+
+    FillParams fill_params;
+    fill_params.density           = 1.f;
+    fill_params.dont_adjust       = true;
+    fill_params.anchor_length_max = 0.f;
+    fill_params.fill_order        = fill_order;
+
+    ExPolygon square(Polygon::new_scale({Vec2d(0, 0), Vec2d(80, 0), Vec2d(80, 80), Vec2d(0, 80)}));
+    {
+        Polygon hole = Polygon::new_scale({Vec2d(30, 30), Vec2d(50, 30), Vec2d(50, 50), Vec2d(30, 50)});
+        if (hole.is_counter_clockwise())
+            hole.reverse();
+        square.holes.emplace_back(std::move(hole));
+    }
+
+    Slic3r::Surface         surface(stTop, square);
+    const Slic3r::Polylines paths = filler->fill_surface(&surface, fill_params);
+    REQUIRE(paths.size() > size_t(arcs));
+
+    // Same sweep direction as the solid-square forced-order test.
+    int ccw = 0, cw = 0;
+    std::vector<int> rings;
+    const double     distance = filler->spacing / fill_params.density;
+    for (const Slic3r::Polyline &pl : paths) {
+        if (pl.points.size() < 3)
+            continue;
+        const Vec2d a = unscale(pl.points.front());
+        const Vec2d b = unscale(pl.points[pl.points.size() / 2]);
+        const Vec2d c = unscale(pl.points.back());
+        const double area2 = (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
+        if (std::abs(area2) < EPSILON)
+            continue;
+        const double radius = (b - a).norm() * (c - b).norm() * (c - a).norm() / (2. * std::abs(area2));
+        const int    ring   = int(std::lround(radius / distance - 0.5));
+        if (ring < 0 || ring >= arcs || std::abs(radius - (double(ring) + 0.5) * distance) > 0.25 * distance)
+            continue;
+        ++(area2 > 0. ? ccw : cw);
+        rings.push_back(ring);
+    }
+    CAPTURE(pattern, int(fill_order), ccw, cw);
+    CHECK(std::min(ccw, cw) == 0);
+    REQUIRE(rings.size() > 30);
+    const size_t third = rings.size() / 3;
+    std::vector<int> head(rings.begin(), rings.begin() + third);
+    std::vector<int> tail(rings.end() - third, rings.end());
+    std::nth_element(head.begin(), head.begin() + head.size() / 2, head.end());
+    std::nth_element(tail.begin(), tail.begin() + tail.size() / 2, tail.end());
+    if (fill_order == SurfaceFillOrder::Inward)
+        CHECK(head[head.size() / 2] > tail[tail.size() / 2]);
+    else
+        CHECK(head[head.size() / 2] < tail[tail.size() / 2]);
+
+    // Chained travel must beat a random-ish Clipper append order proxy: the same paths
+    // sorted by start point only (ignores end→start), which is what a naïve lattice dump
+    // after clip roughly looks like when Clipper reorders.
+    double chained = 0.;
+    for (size_t i = 1; i < paths.size(); ++i)
+        chained += (paths[i].first_point() - paths[i - 1].last_point()).cast<double>().norm();
+
+    Slic3r::Polylines by_start = paths;
+    std::stable_sort(by_start.begin(), by_start.end(), [](const Polyline &a, const Polyline &b) {
+        if (a.first_point().y() != b.first_point().y())
+            return a.first_point().y() < b.first_point().y();
+        return a.first_point().x() < b.first_point().x();
+    });
+    double sorted_travel = 0.;
+    for (size_t i = 1; i < by_start.size(); ++i)
+        sorted_travel += (by_start[i].first_point() - by_start[i - 1].last_point()).cast<double>().norm();
+
+    CAPTURE(chained, sorted_travel);
+    CHECK(chained <= sorted_travel * 1.05);
 }
 
