@@ -53,6 +53,28 @@ protected:
     float _layer_angle(size_t idx) const override { return float(M_PI/3.) * (idx % 3); }
 };
 
+// Decorative top/bottom hexagon mesh: pointy-top honeycomb walls, unfilled cell
+// whose long diagonal is 5 line spacings. Same zigzag as FillHoneycomb, but the
+// cell size is locked to that hole (not density-packed) and the pattern does not
+// rotate per layer.
+class FillHexagon : public Fill
+{
+public:
+    ~FillHexagon() override = default;
+    bool is_self_crossing() override { return false; }
+
+protected:
+    Fill *clone() const override { return new FillHexagon(*this); }
+    void  _fill_surface_single(
+        const FillParams              &params,
+        unsigned int                   thickness_layers,
+        const std::pair<float, Point> &direction,
+        ExPolygon                      expolygon,
+        Polylines                     &polylines_out) override;
+
+    float _layer_angle(size_t /* idx */) const override { return 0.f; }
+};
+
 } // namespace Slic3r
 
 #endif // slic3r_FillHoneycomb_hpp_

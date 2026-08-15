@@ -1530,6 +1530,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         case ipScales4:
         case ipScales6:
         case ipScales8:
+        case ipHexagon:
         case ipZigZag:
         case ipCrossZag:
 		case ipLockedZag: break;

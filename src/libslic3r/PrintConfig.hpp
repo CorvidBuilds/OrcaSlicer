@@ -117,6 +117,7 @@ enum InfillPattern : int {
     ipSupportBase, ipConcentricInternal,
     ipGosperCurve,
     ipScales4, ipScales6, ipScales8,
+    ipHexagon,
     ipCount,
 };
 

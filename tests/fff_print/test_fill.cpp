@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <sstream>
@@ -13,6 +14,7 @@
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Line.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SVG.hpp"
 #include "libslic3r/libslic3r.h"
@@ -815,4 +817,103 @@ TEST_CASE("Scales surface pattern with a forced fill order sweeps one arc at a t
     // same end of the arc. One direction has to account for every measurable fragment.
     CAPTURE(ccw, cw);
     CHECK(std::min(ccw, cw) == 0);
+}
+
+static double min_path_distance(const Slic3r::Polylines &paths, const Slic3r::Point &p)
+{
+    double best = std::numeric_limits<double>::max();
+    for (const Slic3r::Polyline &pl : paths) {
+        if (pl.points.size() < 2)
+            continue;
+        for (size_t i = 1; i < pl.points.size(); ++ i)
+            best = std::min(best, Slic3r::Line(pl.points[i - 1], pl.points[i]).distance_to(p));
+    }
+    return unscale<double>(best);
+}
+
+TEST_CASE("Hexagon surface pattern leaves a 5-line-width hole and does not double-stroke walls", "[Fill]")
+{
+    const double spacing = 0.5;
+    const double density = 1.0;
+    const double u       = spacing / density;
+    const double R       = u * (2.5 + 1. / std::sqrt(3.));
+
+    std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("hexagon"));
+    filler->spacing = spacing;
+    filler->angle   = 0.f;
+
+    FillParams fill_params;
+    fill_params.density           = float(density);
+    fill_params.dont_adjust       = true;
+    fill_params.anchor_length_max = 0.f;
+
+    const Slic3r::ExPolygon square(Slic3r::Polygon::new_scale(
+        {Vec2d(0, 0), Vec2d(200, 0), Vec2d(200, 200), Vec2d(0, 200)}));
+    Slic3r::Surface         surface(stInternal, square);
+    const Slic3r::Polylines paths = filler->fill_surface(&surface, fill_params);
+    REQUIRE(! paths.empty());
+
+    for (const Slic3r::Polyline &pl : paths)
+        REQUIRE(! pl.is_closed());
+
+    const coord_t side_tol = scale_(0.08 * R);
+    const coord_t apothem  = coord_t(std::round(scale_(R * std::sqrt(3.) / 2.)));
+    bool          found    = false;
+    for (const Slic3r::Polyline &pl : paths) {
+        for (size_t i = 1; i < pl.points.size(); ++ i) {
+            const Slic3r::Point &a = pl.points[i - 1];
+            const Slic3r::Point &b = pl.points[i];
+            const double         len = unscale<double>((b - a).cast<double>().norm());
+            if (std::abs(len - R) > 0.08 * R)
+                continue;
+            // Original vertical sides become (nearly) axis-aligned after the π/2 infill rotation.
+            if (std::abs(a.x() - b.x()) > side_tol && std::abs(a.y() - b.y()) > side_tol)
+                continue;
+
+            const Vec2d mid = 0.5 * (a.cast<double>() + b.cast<double>());
+            Vec2d       n(double(a.y() - b.y()), double(b.x() - a.x()));
+            const double nlen = n.norm();
+            if (nlen < 1.)
+                continue;
+            n /= nlen;
+            const Slic3r::Point center{
+                coord_t(std::round(mid.x() + n.x() * double(apothem))),
+                coord_t(std::round(mid.y() + n.y() * double(apothem)))};
+            const double cx = unscale<double>(center.x());
+            const double cy = unscale<double>(center.y());
+            if (cx < 40. || cx > 160. || cy < 40. || cy > 160.)
+                continue;
+
+            const double hole = min_path_distance(paths, center);
+            REQUIRE(hole > 2.4 * u);
+
+            Vec2d along(double(b.x() - a.x()), double(b.y() - a.y()));
+            along /= along.norm();
+            const double void_r = scale_(2.5 * u);
+            const Slic3r::Point v0{
+                coord_t(std::round(double(center.x()) + along.x() * void_r)),
+                coord_t(std::round(double(center.y()) + along.y() * void_r))};
+            const Slic3r::Point v1{
+                coord_t(std::round(double(center.x()) - along.x() * void_r)),
+                coord_t(std::round(double(center.y()) - along.y() * void_r))};
+            CHECK_THAT(unscale<double>((v0 - v1).cast<double>().norm()), Catch::Matchers::WithinRel(5. * u, 0.02));
+            const double d0 = min_path_distance(paths, v0);
+            const double d1 = min_path_distance(paths, v1);
+            REQUIRE(d0 > 0.2 * u);
+            REQUIRE(d1 > 0.2 * u);
+            found = true;
+            break;
+        }
+        if (found)
+            break;
+    }
+    REQUIRE(found);
+
+    double length = 0.;
+    for (const Slic3r::Polyline &pl : paths)
+        length += unscale<double>(pl.length());
+    const double area      = unscale<double>(unscale<double>(square.area()));
+    const double cell_area = 1.5 * std::sqrt(3.) * R * R;
+    const double expected  = area / cell_area * 3. * R;
+    CHECK_THAT(length, Catch::Matchers::WithinRel(expected, 0.15));
 }

@@ -66,6 +66,7 @@ Fill* Fill::new_from_type(const InfillPattern type)
     case ipScales4:             return new FillScales(4);
     case ipScales6:             return new FillScales(6);
     case ipScales8:             return new FillScales(8);
+    case ipHexagon:             return new FillHexagon();
     case ipAdaptiveCubic:       return new FillAdaptive::Filler();
     case ipSupportCubic:        return new FillAdaptive::Filler();
     case ipSupportBase:         return new FillSupportBase();  // simply line fill

@@ -1,4 +1,9 @@
+#include <algorithm>
+#include <cmath>
+#include <utility>
+
 #include "../ClipperUtils.hpp"
+#include "../Polygon.hpp"
 #include "../ShortestPath.hpp"
 #include "../Surface.hpp"
 
@@ -75,6 +80,60 @@ void FillHoneycomb::_fill_surface_single(
     }
     // Apply multiline offset if needed
     multiline_fill(all_polylines, params, spacing);
+
+    all_polylines = intersection_pl(std::move(all_polylines), expolygon);
+    chain_or_connect_infill(std::move(all_polylines), expolygon, polylines_out, this->spacing, params);
+}
+
+void FillHexagon::_fill_surface_single(
+    const FillParams              &params,
+    unsigned int                   /* thickness_layers */,
+    const std::pair<float, Point> &direction,
+    ExPolygon                      expolygon,
+    Polylines                     &polylines_out)
+{
+    // u is the distance between neighbouring lines. The unfilled long diagonal is 5u;
+    // the path is offset outward by half a line-width along the vertex (0.5 / cos(30°) = 1/√3).
+    const double  u          = scale_(this->spacing) / double(params.density);
+    const double  R          = u * (2.5 + 1. / std::sqrt(3.));
+    const coord_t hex_side   = coord_t(std::round(R));
+    const coord_t distance   = coord_t(std::round(R * std::sqrt(3.) / 2.));
+    const coord_t hex_width  = distance * 2;
+    const coord_t y_short    = coord_t(std::round(R / 2.));
+    const coord_t pattern_h  = hex_side * 3;
+    const Point   hex_center(hex_width / 2, hex_side);
+
+    BoundingBox bounding_box = expolygon.contour.bounding_box();
+    {
+        Polygon bb_polygon = bounding_box.polygon();
+        bb_polygon.rotate(direction.first, hex_center);
+        bounding_box = bb_polygon.bounding_box();
+        bounding_box.offset(hex_width);
+        bounding_box.merge(align_to_grid(bounding_box.min, Point(hex_width, pattern_h)));
+    }
+
+    Polylines all_polylines;
+    coord_t   x = bounding_box.min(0);
+    while (x <= bounding_box.max(0)) {
+        Polyline p;
+        coord_t  ax[2] = { x, x + distance };
+        for (size_t i = 0; i < 2; ++ i) {
+            std::reverse(p.points.begin(), p.points.end());
+            for (coord_t y = bounding_box.min(1); y <= bounding_box.max(1); y += y_short + hex_side + y_short + hex_side) {
+                p.points.push_back(Point(ax[1], y));
+                p.points.push_back(Point(ax[0], y + y_short));
+                p.points.push_back(Point(ax[0], y + y_short + hex_side));
+                p.points.push_back(Point(ax[1], y + y_short + hex_side + y_short));
+                p.points.push_back(Point(ax[1], y + y_short + hex_side + y_short + hex_side));
+            }
+            ax[0] += distance;
+            ax[1] += distance;
+            std::swap(ax[0], ax[1]);
+            x += distance;
+        }
+        p.rotate(-direction.first, hex_center);
+        all_polylines.push_back(std::move(p));
+    }
 
     all_polylines = intersection_pl(std::move(all_polylines), expolygon);
     chain_or_connect_infill(std::move(all_polylines), expolygon, polylines_out, this->spacing, params);
