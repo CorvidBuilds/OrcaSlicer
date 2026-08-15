@@ -167,6 +167,8 @@ set(lisbslic3r_sources
     Fill/FillRectilinear.hpp
     Fill/FillScales.cpp
     Fill/FillScales.hpp
+    Fill/FillSymmetricWave.cpp
+    Fill/FillSymmetricWave.hpp
     Fill/FillTpmsD.cpp
     Fill/FillTpmsD.hpp
     Fill/FillTpmsFK.cpp

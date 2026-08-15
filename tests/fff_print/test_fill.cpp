@@ -917,3 +917,320 @@ TEST_CASE("Hexagon surface pattern leaves a 5-line-width hole and does not doubl
     const double expected  = area / cell_area * 3. * R;
     CHECK_THAT(length, Catch::Matchers::WithinRel(expected, 0.15));
 }
+
+namespace {
+
+struct Stroke
+{
+    Polyline pl;
+    double   spacing{0};
+};
+
+void collect_strokes(const ExtrusionEntity *e, std::vector<Stroke> &out)
+{
+    if (const auto *c = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
+        for (const ExtrusionEntity *ch : c->entities)
+            collect_strokes(ch, out);
+    } else if (const auto *p = dynamic_cast<const ExtrusionPath *>(e)) {
+        Stroke s;
+        s.pl      = p->as_polyline();
+        s.spacing = Flow::rounded_rectangle_extrusion_spacing(p->width, p->height);
+        if (s.pl.points.size() >= 2)
+            out.emplace_back(std::move(s));
+    } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(e)) {
+        for (const ExtrusionPath &p : loop->paths) {
+            Stroke s;
+            s.pl      = p.as_polyline();
+            s.spacing = Flow::rounded_rectangle_extrusion_spacing(p.width, p.height);
+            if (s.pl.points.size() >= 2)
+                out.emplace_back(std::move(s));
+        }
+    }
+}
+
+struct WaveFill
+{
+    std::unique_ptr<Fill> filler;
+    FillParams            params;
+    Surface               surface;
+    ExtrusionEntitiesPtr  out;
+
+    WaveFill(double spacing, double density, const ExPolygon &poly)
+        : surface(stTop, poly)
+    {
+        filler.reset(Fill::new_from_type("symmetricwave"));
+        const float height = 0.2f;
+        const float width  = float(spacing) + height * float(1. - 0.25 * PI);
+        params.flow              = Flow(width, height, 0.4f);
+        params.density           = float(density);
+        params.dont_adjust       = true;
+        params.anchor_length_max = 0.f;
+        params.extrusion_role    = erTopSolidInfill;
+        params.resolution        = 0.0125;
+        filler->spacing          = params.flow.spacing();
+        // _infill_direction adds π/2, so this keeps the wave along +X.
+        filler->angle            = -float(PI / 2.0);
+        filler->overlap          = 0;
+        filler->fill_surface_extrusion(&surface, params, out);
+    }
+
+    ~WaveFill()
+    {
+        for (ExtrusionEntity *e : out)
+            delete e;
+    }
+
+    std::vector<Stroke> strokes() const
+    {
+        std::vector<Stroke> s;
+        for (const ExtrusionEntity *e : out)
+            collect_strokes(e, s);
+        return s;
+    }
+};
+
+} // namespace
+
+// Sample the y of every centreline crossing a vertical line, low to high.
+static std::vector<double> crossings_at(const std::vector<Stroke> &strokes, double x_mm)
+{
+    const coord_t       x = scale_(x_mm);
+    std::vector<double> ys;
+    for (const Stroke &s : strokes) {
+        for (size_t i = 1; i < s.pl.points.size(); ++i) {
+            const Point &a = s.pl.points[i - 1];
+            const Point &b = s.pl.points[i];
+            if (double(a.x() - x) * double(b.x() - x) > 0)
+                continue;
+            const double den = double(b.x() - a.x());
+            if (std::abs(den) < 1)
+                continue;
+            const double t = double(x - a.x()) / den;
+            if (t < -1e-6 || t > 1. + 1e-6)
+                continue;
+            ys.push_back(unscale<double>(double(a.y()) + t * double(b.y() - a.y())));
+        }
+    }
+    std::sort(ys.begin(), ys.end());
+    return ys;
+}
+
+struct WaveCrossing
+{
+    double y{};
+    double spacing{};
+};
+
+// Like crossings_at, but keeps the path spacing with each hit.
+static std::vector<WaveCrossing> crossings_with_width(const std::vector<Stroke> &strokes, double x_mm)
+{
+    const coord_t             x = scale_(x_mm);
+    std::vector<WaveCrossing> out;
+    for (const Stroke &s : strokes) {
+        for (size_t i = 1; i < s.pl.points.size(); ++i) {
+            const Point &a = s.pl.points[i - 1];
+            const Point &b = s.pl.points[i];
+            if (double(a.x() - x) * double(b.x() - x) > 0)
+                continue;
+            const double den = double(b.x() - a.x());
+            if (std::abs(den) < 1)
+                continue;
+            const double t = double(x - a.x()) / den;
+            if (t < -1e-6 || t > 1. + 1e-6)
+                continue;
+            WaveCrossing c;
+            c.y       = unscale<double>(double(a.y()) + t * double(b.y() - a.y()));
+            c.spacing = s.spacing;
+            out.push_back(c);
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const WaveCrossing &a, const WaveCrossing &b) { return a.y < b.y; });
+    return out;
+}
+
+TEST_CASE("Symmetric Wave covers the plane at density 1", "[Fill]")
+{
+    // Paired even+odd widths sum to 2 H1 cos(theta), so their combined vertical
+    // extent is 2 H1 and rows at pitch H = H1 cover the plane. Measured along
+    // the path, that is the integral of w ds over the area.
+    const double              spacing = 0.4;
+    const ExPolygon           square(Polygon::new_scale({Vec2d(0, 0), Vec2d(80, 0), Vec2d(80, 80), Vec2d(0, 80)}));
+    WaveFill                  fill(spacing, 1.0, square);
+    const std::vector<Stroke> strokes = fill.strokes();
+    REQUIRE(!strokes.empty());
+
+    double w_ds = 0;
+    for (const Stroke &s : strokes)
+        w_ds += s.spacing * unscale<double>(s.pl.length());
+    const double area = unscale<double>(unscale<double>(square.area()));
+    REQUIRE(w_ds > 0);
+    CHECK_THAT(w_ds / area, Catch::Matchers::WithinRel(1.0, 0.05));
+}
+
+TEST_CASE("Symmetric Wave rows share one phase at a constant pitch", "[Fill]")
+{
+    // Every row is the same curve translated in y. A half-period shift between
+    // neighbours would pinch the channel shut at each peak and tile the surface
+    // with closed diamonds instead, so the pitch has to be the same at a turn
+    // as it is on a leg.
+    const double              spacing = 0.4;
+    const ExPolygon           square(Polygon::new_scale({Vec2d(0, 0), Vec2d(80, 0), Vec2d(80, 80), Vec2d(0, 80)}));
+    WaveFill                  fill(spacing, 1.0, square);
+    const std::vector<Stroke> strokes = fill.strokes();
+    REQUIRE(!strokes.empty());
+
+    std::vector<double> pitches;
+    for (double x_mm = 16; x_mm <= 64; x_mm += 0.13) {
+        const std::vector<double> ys = crossings_at(strokes, x_mm);
+        for (size_t i = 1; i < ys.size(); ++i)
+            pitches.push_back(ys[i] - ys[i - 1]);
+    }
+    REQUIRE(pitches.size() > 10);
+    const auto mm = std::minmax_element(pitches.begin(), pitches.end());
+    CHECK(*mm.second - *mm.first < 0.25 * spacing);
+}
+
+TEST_CASE("Symmetric Wave alternate rows swell on opposite legs", "[Fill]")
+{
+    // Even rows swell on the descending leg, odd rows on the ascending leg, so
+    // neighbours trade width while their sum keeps the coverage identity. A
+    // single shared apex-centred law, or a half-period nest, would either put
+    // the swell back on the turns or close diamonds — both are regressions.
+    const double              spacing = 0.4;
+    const ExPolygon           square(Polygon::new_scale({Vec2d(0, 0), Vec2d(80, 0), Vec2d(80, 80), Vec2d(0, 80)}));
+    WaveFill                  fill(spacing, 1.0, square);
+    const std::vector<Stroke> strokes = fill.strokes();
+    REQUIRE(!strokes.empty());
+
+    // variable_width splits each row into constant-width fragments, so classify
+    // fragments by the sign of their slope rather than trying to average a whole
+    // row. Both legs must carry fat fragments and thin fragments.
+    double w_min = 1e9, w_max = 0;
+    double fat_asc = 0, fat_desc = 0, thin_asc = 0, thin_desc = 0;
+    for (const Stroke &s : strokes) {
+        w_min = std::min(w_min, s.spacing);
+        w_max = std::max(w_max, s.spacing);
+    }
+    REQUIRE(w_min > 0);
+    CHECK(w_max / w_min > 1.4);
+    const double mid = 0.5 * (w_min + w_max);
+    for (const Stroke &s : strokes) {
+        for (size_t i = 1; i < s.pl.points.size(); ++i) {
+            const double dx = unscale<double>(s.pl.points[i].x() - s.pl.points[i - 1].x());
+            const double dy = unscale<double>(s.pl.points[i].y() - s.pl.points[i - 1].y());
+            if (std::abs(dx) < 1e-6)
+                continue;
+            const double len = std::hypot(dx, dy);
+            const bool   asc = dy / dx > 0;
+            if (s.spacing > mid) {
+                (asc ? fat_asc : fat_desc) += len;
+            } else if (s.spacing < mid) {
+                (asc ? thin_asc : thin_desc) += len;
+            }
+        }
+    }
+    CHECK(fat_asc > 1);
+    CHECK(fat_desc > 1);
+    CHECK(thin_asc > 1);
+    CHECK(thin_desc > 1);
+    // Roughly balanced — not a shared apex law dumping all fat onto the flats.
+    CHECK_THAT(fat_asc, Catch::Matchers::WithinRel(fat_desc, 0.4));
+    CHECK_THAT(thin_asc, Catch::Matchers::WithinRel(thin_desc, 0.4));
+
+    // At a fixed x, neighbouring rows are complementary: when one is wide the
+    // other is narrow, and the pair sum still tracks 2 H1 cos(theta).
+    std::vector<double> pair_sums;
+    int                 complementary = 0, total_pairs = 0;
+    for (double x_mm = 16; x_mm <= 64; x_mm += 0.26) {
+        const std::vector<WaveCrossing> xs = crossings_with_width(strokes, x_mm);
+        for (size_t i = 1; i < xs.size(); ++i) {
+            const double a = xs[i - 1].spacing;
+            const double b = xs[i].spacing;
+            pair_sums.push_back(a + b);
+            ++total_pairs;
+            if (std::abs(a - b) > 0.05 * spacing)
+                ++complementary;
+        }
+    }
+    REQUIRE(pair_sums.size() > 20);
+    REQUIRE(total_pairs > 0);
+    CHECK(complementary * 2 > total_pairs);
+    const auto mm = std::minmax_element(pair_sums.begin(), pair_sums.end());
+    // Pair sum follows cos(theta): higher at turns than at the steep legs, and
+    // never collapses below a filled-channel floor.
+    CHECK(*mm.second - *mm.first > 0.15 * spacing);
+    CHECK(*mm.first > 1.5 * spacing);
+}
+
+TEST_CASE("Symmetric Wave clip keeps every vertex inside the surface", "[Fill]")
+{
+    const double    spacing = 0.4;
+    const ExPolygon square(Polygon::new_scale({Vec2d(0, 0), Vec2d(8, 0), Vec2d(8, 8), Vec2d(0, 8)}));
+    WaveFill        fill(spacing, 1.0, square);
+    const std::vector<Stroke> strokes = fill.strokes();
+    REQUIRE(!strokes.empty());
+
+    Polylines paths;
+    for (const Stroke &s : strokes)
+        paths.push_back(s.pl);
+    CHECK(diff_pl(paths, offset(square, float(SCALED_EPSILON * 10))).empty());
+}
+
+TEST_CASE("Symmetric Wave paths are monotonic bottom to top, left to right", "[Fill]")
+{
+    // Clipper's PolyTree does not preserve input order, and the G-code planner
+    // would re-chain paths unless no_sort is set. Rows must stay bottom-to-top
+    // and each fragment left-to-right so neighbouring beads start on the same side.
+    const double              spacing = 0.4;
+    const ExPolygon           square(Polygon::new_scale({Vec2d(0, 0), Vec2d(40, 0), Vec2d(40, 40), Vec2d(0, 40)}));
+    WaveFill                  fill(spacing, 1.0, square);
+    const std::vector<Stroke> strokes = fill.strokes();
+    REQUIRE(strokes.size() > 4);
+
+    for (const Stroke &s : strokes) {
+        CHECK(s.pl.points.front().x() <= s.pl.points.back().x());
+    }
+
+    // Walk strokes in emission order; at a fixed x each row contributes at most
+    // one crossing, so those y values must be non-decreasing.
+    std::vector<double> ys_in_order;
+    for (double x_mm : {10.0, 20.0, 30.0}) {
+        ys_in_order.clear();
+        const coord_t x = scale_(x_mm);
+        for (const Stroke &s : strokes) {
+            for (size_t i = 1; i < s.pl.points.size(); ++i) {
+                const Point &a = s.pl.points[i - 1];
+                const Point &b = s.pl.points[i];
+                if (double(a.x() - x) * double(b.x() - x) > 0)
+                    continue;
+                const double den = double(b.x() - a.x());
+                if (std::abs(den) < 1)
+                    continue;
+                const double t = double(x - a.x()) / den;
+                if (t < -1e-6 || t > 1. + 1e-6)
+                    continue;
+                ys_in_order.push_back(unscale<double>(double(a.y()) + t * double(b.y() - a.y())));
+                break; // one crossing per stroke is enough
+            }
+        }
+        REQUIRE(ys_in_order.size() > 3);
+        for (size_t i = 1; i < ys_in_order.size(); ++i)
+            CHECK(ys_in_order[i] + 1e-6 >= ys_in_order[i - 1]);
+    }
+}
+
+TEST_CASE("Symmetric Wave can be constructed without crashing", "[Fill]")
+{
+    std::unique_ptr<Fill> filler(Fill::new_from_type("symmetricwave"));
+    REQUIRE(filler);
+    CHECK_FALSE(filler->is_self_crossing());
+    CHECK(filler->no_sort());
+    filler->spacing = 0.4;
+    filler->angle   = 0.f;
+    FillParams params;
+    params.density = 1.f;
+    const ExPolygon square(Polygon::new_scale({Vec2d(0, 0), Vec2d(10, 0), Vec2d(10, 10), Vec2d(0, 10)}));
+    Surface         surface(stInternal, square);
+    CHECK(filler->fill_surface(&surface, params).empty());
+}
+

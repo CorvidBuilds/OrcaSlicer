@@ -281,7 +281,8 @@ static t_config_enum_values s_keys_map_InfillPattern {
     { "scales4", ipScales4 },
     { "scales6", ipScales6 },
     { "scales8", ipScales8 },
-    { "hexagon", ipHexagon }
+    { "hexagon", ipHexagon },
+    { "symmetricwave", ipSymmetricWave }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
@@ -2305,6 +2306,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("scales6");
     def->enum_values.push_back("scales8");
     def->enum_values.push_back("hexagon");
+    def->enum_values.push_back("symmetricwave");
     def->enum_labels.push_back(L("Monotonic"));
     def->enum_labels.push_back(L("Monotonic line"));
     def->enum_labels.push_back(L("Rectilinear"));
@@ -2318,6 +2320,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Scales (6 arcs)"));
     def->enum_labels.push_back(L("Scales (8 arcs)"));
     def->enum_labels.push_back(L("Hexagon"));
+    def->enum_labels.push_back(L("Symmetric Wave"));
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonicLine));
 
     def = this->add("top_surface_density", coPercent);
