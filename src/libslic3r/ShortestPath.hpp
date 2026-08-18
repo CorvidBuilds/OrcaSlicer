@@ -45,6 +45,35 @@ template<typename T> inline void reorder_by_shortest_traverse(std::vector<T> &po
     for (size_t i:order) polylines_out.emplace_back(std::move(Temp[i]));
 }
 
+// Contiguous oriented open paths that must print as a block. The chainer reorders
+// regions only — never reverses a path inside a region.
+//
+// Invariants for chain_oriented_regions:
+// - every region has at least one non-empty path
+// - predecessors[i] indices are in range; the graph is a DAG
+// - output is a total permutation; no polyline is reversed
+// - ExtrusionEntityCollection::no_sort remains the caller's responsibility
+struct OrientedPathRegion
+{
+    Polylines paths;
+
+    Point start() const { return paths.front().first_point(); }
+    Point end()   const { return paths.back().last_point(); }
+};
+
+// Reorder regions to cut end→start travel while honouring predecessors.
+// Empty predecessors ⇒ pure greedy among remaining regions (still no reverse).
+// ponytail: greedy NN only — fine for Wave/Scales strip counts; upgrade to
+// pheromone (see FillRectilinear monotonic) if a profile shows long jumps.
+std::vector<size_t> chain_oriented_regions(
+    const std::vector<OrientedPathRegion>       &regions,
+    const std::vector<std::vector<size_t>>      &predecessors,
+    const Point                                 *start_near = nullptr);
+
+Polylines flatten_oriented_regions(
+    const std::vector<OrientedPathRegion> &regions,
+    const std::vector<size_t>             &order);
+
 ClipperLib::PolyNodes				 chain_clipper_polynodes(const Points &points, const ClipperLib::PolyNodes &items);
 
 // Chain instances of print objects by an approximate shortest path.

@@ -1,5 +1,7 @@
 #include <catch2/catch_all.hpp>
 
+#include <algorithm>
+
 #include "libslic3r/Point.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Polygon.hpp"
@@ -355,6 +357,99 @@ SCENARIO("Path chaining", "[Geometry]") {
 			}
 		}
 	}
+}
+
+TEST_CASE("Oriented region chain with empty preds is greedy and never reverses", "[OrientedPathChain][Geometry]")
+{
+    auto horiz = [](coord_t x0, coord_t x1, coord_t y) {
+        return Polyline{Point(x0, y), Point(x1, y)};
+    };
+    std::vector<OrientedPathRegion> regions = {
+        {Polylines{horiz(0, 10, 0)}},
+        {Polylines{horiz(0, 10, 20)}},
+        {Polylines{horiz(0, 10, 10)}},
+    };
+    std::vector<std::vector<size_t>> preds(3);
+    const Point start(0, 0);
+
+    const std::vector<size_t> order = chain_oriented_regions(regions, preds, &start);
+    REQUIRE(order.size() == 3);
+    REQUIRE(order[0] == 0);
+    REQUIRE(order[1] == 2);
+    REQUIRE(order[2] == 1);
+
+    const Polylines flat = flatten_oriented_regions(regions, order);
+    REQUIRE(flat.size() == 3);
+    for (size_t i = 0; i < flat.size(); ++i) {
+        CHECK(flat[i].first_point().x() <= flat[i].last_point().x());
+        CHECK(flat[i].first_point() == regions[order[i]].start());
+        CHECK(flat[i].last_point() == regions[order[i]].end());
+    }
+}
+
+TEST_CASE("Oriented region chain respects predecessors over a closer region", "[OrientedPathChain][Geometry]")
+{
+    auto horiz = [](coord_t x0, coord_t x1, coord_t y) {
+        return Polyline{Point(x0, y), Point(x1, y)};
+    };
+    std::vector<OrientedPathRegion> regions = {
+        {Polylines{horiz(100, 110, 0)}},
+        {Polylines{horiz(0, 10, 0)}},
+    };
+    std::vector<std::vector<size_t>> preds(2);
+    preds[1] = {0};
+    const Point start(0, 0);
+
+    const std::vector<size_t> order = chain_oriented_regions(regions, preds, &start);
+    REQUIRE(order.size() == 2);
+    CHECK(order[0] == 0);
+    CHECK(order[1] == 1);
+}
+
+TEST_CASE("Oriented region chain keeps multi-path region internal order", "[OrientedPathChain][Geometry]")
+{
+    auto horiz = [](coord_t x0, coord_t x1, coord_t y) {
+        return Polyline{Point(x0, y), Point(x1, y)};
+    };
+    OrientedPathRegion block;
+    block.paths = {horiz(0, 10, 0), horiz(0, 10, 5), horiz(0, 10, 10)};
+    OrientedPathRegion other{Polylines{horiz(50, 60, 0)}};
+
+    std::vector<OrientedPathRegion> regions = {other, block};
+    std::vector<std::vector<size_t>> preds(2);
+    const Point start(0, 0);
+
+    const std::vector<size_t> order = chain_oriented_regions(regions, preds, &start);
+    REQUIRE(order.front() == 1);
+
+    const Polylines flat = flatten_oriented_regions(regions, order);
+    REQUIRE(flat.size() == 4);
+    CHECK(flat[0].first_point() == Point(0, 0));
+    CHECK(flat[1].first_point() == Point(0, 5));
+    CHECK(flat[2].first_point() == Point(0, 10));
+    CHECK(regions[1].start() == Point(0, 0));
+    CHECK(regions[1].end() == Point(10, 10));
+}
+
+TEST_CASE("Oriented region chain falls back to a total order on a cyclic graph", "[OrientedPathChain][Geometry]")
+{
+    auto horiz = [](coord_t x0, coord_t x1, coord_t y) {
+        return Polyline{Point(x0, y), Point(x1, y)};
+    };
+    std::vector<OrientedPathRegion> regions = {
+        {Polylines{horiz(0, 10, 0)}},
+        {Polylines{horiz(0, 10, 10)}},
+    };
+    std::vector<std::vector<size_t>> preds(2);
+    preds[0] = {1};
+    preds[1] = {0};
+
+    const std::vector<size_t> order = chain_oriented_regions(regions, preds, nullptr);
+    REQUIRE(order.size() == 2);
+    std::vector<size_t> sorted = order;
+    std::sort(sorted.begin(), sorted.end());
+    CHECK(sorted[0] == 0);
+    CHECK(sorted[1] == 1);
 }
 
 SCENARIO("Line distances", "[Geometry]"){

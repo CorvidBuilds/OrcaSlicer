@@ -5,6 +5,7 @@
 #include "../ClipperUtils.hpp"
 #include "../ExtrusionEntityCollection.hpp"
 #include "../Polyline.hpp"
+#include "../ShortestPath.hpp"
 #include "../Surface.hpp"
 #include "../VariableWidth.hpp"
 
@@ -176,6 +177,29 @@ void sort_row_ltr(Polylines &row, float infill_angle)
     std::sort(row.begin(), row.end(), [&](const Polyline &a, const Polyline &b) { return key_x(a) < key_x(b); });
 }
 
+// Infill-frame x span of an already L→R oriented fragment.
+void frag_x_span(const Polyline &pl, float infill_angle, coord_t &xmin, coord_t &xmax)
+{
+    Point a = pl.points.front();
+    Point b = pl.points.back();
+    a.rotate(infill_angle);
+    b.rotate(infill_angle);
+    xmin = std::min(a.x(), b.x());
+    xmax = std::max(a.x(), b.x());
+}
+
+struct FrontierSpan
+{
+    coord_t xmin;
+    coord_t xmax;
+    size_t  owner;
+};
+
+bool x_overlap(coord_t a0, coord_t a1, coord_t b0, coord_t b1)
+{
+    return !(a1 < b0 || b1 < a0);
+}
+
 } // namespace
 
 void FillSymmetricWave::fill_surface_extrusion(const Surface *surface, const FillParams &params,
@@ -199,7 +223,11 @@ void FillSymmetricWave::fill_surface_extrusion(const Surface *surface, const Fil
     const coord_t                 pitch_y   = coord_t(W.H);
     const coord_t                 pad       = coord_t(std::lround(W.A + W.H1));
 
-    ThickPolylines thick;
+    std::vector<OrientedPathRegion>  regions;
+    std::vector<std::vector<size_t>> predecessors;
+    Point                            start_near(0, 0);
+    bool                             have_start = false;
+
     for (const ExPolygon &expolygon : expp) {
         BoundingBox bbox = expolygon.contour.bounding_box();
         {
@@ -213,11 +241,14 @@ void FillSymmetricWave::fill_surface_extrusion(const Surface *surface, const Fil
         // agree on which rows swell on the ascending vs descending leg.
         const Point origin = align_to_grid(bbox.min, Point(pitch_x, pitch_y * 2));
 
-        // Clip per row so Clipper's PolyTree cannot scramble the bottom-to-top
-        // order. Within a row, sort fragments left-to-right and orient each one
-        // the same way — that is the monotonic print order.
-        const int n_max = int(std::ceil((coordf_t(bbox.max.y()) - coordf_t(origin.y())) / W.H));
-        const int i_max = int(std::ceil((coordf_t(bbox.max.x()) - coordf_t(origin.x())) / W.P));
+        // Clip per row so Clipper's PolyTree cannot scramble bottom-to-top
+        // generation. Fragments are then grouped into oriented regions and
+        // chained under an x-interval frontier DAG so holes are crossed once
+        // per channel merge rather than once per row.
+        const int                 n_max = int(std::ceil((coordf_t(bbox.max.y()) - coordf_t(origin.y())) / W.H));
+        const int                 i_max = int(std::ceil((coordf_t(bbox.max.x()) - coordf_t(origin.x())) / W.P));
+        std::vector<FrontierSpan> frontier;
+
         for (int n = 0; n <= n_max; ++n) {
             const coordf_t     y_base = coordf_t(origin.y()) + coordf_t(n) * W.H;
             std::vector<Vec2d> pts;
@@ -235,15 +266,65 @@ void FillSymmetricWave::fill_surface_extrusion(const Surface *surface, const Fil
 
             Polylines row = intersection_pl(Polylines{std::move(pl)}, expolygon);
             sort_row_ltr(row, direction.first);
+
+            std::vector<FrontierSpan> row_spans;
+            row_spans.reserve(row.size());
+            size_t prev_in_row = size_t(-1);
             for (Polyline &frag : row) {
                 orient_ltr(frag, direction.first);
-                ThickPolyline tp = to_thick(frag, W, direction.first);
-                if (tp.points.size() >= 2 && tp.width.size() == (tp.points.size() - 1) * 2)
-                    thick.emplace_back(std::move(tp));
+                if (frag.points.size() < 2)
+                    continue;
+
+                coord_t xmin, xmax;
+                frag_x_span(frag, direction.first, xmin, xmax);
+
+                OrientedPathRegion region;
+                region.paths.emplace_back(std::move(frag));
+                regions.emplace_back(std::move(region));
+                predecessors.emplace_back();
+
+                if (prev_in_row != size_t(-1))
+                    predecessors.back().push_back(prev_in_row);
+                for (const FrontierSpan &sp : frontier)
+                    if (x_overlap(xmin, xmax, sp.xmin, sp.xmax))
+                        predecessors.back().push_back(sp.owner);
+
+                const size_t idx = regions.size() - 1;
+                if (!have_start) {
+                    start_near = regions.back().start();
+                    have_start = true;
+                }
+                row_spans.push_back({xmin, xmax, idx});
+                prev_in_row = idx;
+            }
+
+            // Replace frontier coverage with this row's fragments so the next
+            // non-empty row depends on the most recent owners at each x.
+            for (const FrontierSpan &sp : row_spans) {
+                frontier.erase(std::remove_if(frontier.begin(), frontier.end(),
+                                              [&](const FrontierSpan &old) {
+                                                  return x_overlap(sp.xmin, sp.xmax, old.xmin, old.xmax);
+                                              }),
+                               frontier.end());
+                frontier.push_back(sp);
             }
         }
     }
 
+    if (regions.empty())
+        return;
+
+    const std::vector<size_t> order =
+        chain_oriented_regions(regions, predecessors, have_start ? &start_near : nullptr);
+    const Polylines ordered = flatten_oriented_regions(regions, order);
+
+    ThickPolylines thick;
+    thick.reserve(ordered.size());
+    for (const Polyline &frag : ordered) {
+        ThickPolyline tp = to_thick(frag, W, direction.first);
+        if (tp.points.size() >= 2 && tp.width.size() == (tp.points.size() - 1) * 2)
+            thick.emplace_back(std::move(tp));
+    }
     if (thick.empty())
         return;
 

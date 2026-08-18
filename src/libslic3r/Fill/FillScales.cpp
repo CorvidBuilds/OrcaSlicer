@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "../ClipperUtils.hpp"
+#include "../ShortestPath.hpp"
 #include "../Surface.hpp"
 
 #include "FillScales.hpp"
@@ -202,14 +203,33 @@ void FillScales::_fill_surface_single(
             pl.rotate(-direction.first);
         }
         pass = intersection_pl(std::move(pass), expolygon);
-        // Deliberately not chained: chain_polylines() reverses paths to shorten travel, and Clipper
-        // is free to hand an open path back either way round. Every scale has to be drawn in the
-        // same direction, otherwise the start-of-extrusion blob lands at the left of one scale and
-        // the right of its neighbour, which is the artefact a forced order exists to prevent.
-        for (Polyline &pl : pass)
+        // Orient every fragment the same way. Do not call chain_polylines(): it reverses paths to
+        // shorten travel, which would put the start-of-extrusion blob on opposite ends of
+        // neighbouring scales. Reorder with an oriented (no-reverse) region chain instead.
+        std::vector<OrientedPathRegion>  regions;
+        std::vector<std::vector<size_t>> predecessors;
+        regions.reserve(pass.size());
+        Point start_near(0, 0);
+        bool  have_start = false;
+        for (Polyline &pl : pass) {
             if (sweeps_ccw(pl))
                 pl.reverse();
-        append(polylines_out, std::move(pass));
+            if (pl.points.size() < 2)
+                continue;
+            if (!have_start) {
+                start_near = pl.first_point();
+                have_start = true;
+            }
+            OrientedPathRegion region;
+            region.paths.emplace_back(std::move(pl));
+            regions.emplace_back(std::move(region));
+        }
+        if (regions.empty())
+            continue;
+        predecessors.resize(regions.size());
+        const std::vector<size_t> order =
+            chain_oriented_regions(regions, predecessors, have_start ? &start_near : nullptr);
+        append(polylines_out, flatten_oriented_regions(regions, order));
     }
 }
 

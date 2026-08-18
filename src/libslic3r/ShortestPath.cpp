@@ -14,6 +14,8 @@
 
 #include <cmath>
 #include <cassert>
+#include <limits>
+#include <utility>
 
 namespace Slic3r {
 
@@ -2112,6 +2114,114 @@ Polylines chain_lines(const std::vector<Line> &lines, const double point_distanc
             }
             out.emplace_back(std::move(pl));
         }
+    return out;
+}
+
+std::vector<size_t> chain_oriented_regions(
+    const std::vector<OrientedPathRegion>  &regions,
+    const std::vector<std::vector<size_t>> &predecessors,
+    const Point                            *start_near)
+{
+    const size_t n = regions.size();
+    std::vector<size_t> identity(n);
+    for (size_t i = 0; i < n; ++i)
+        identity[i] = i;
+    if (n == 0)
+        return identity;
+    if (predecessors.size() != n) {
+        assert(false);
+        return identity;
+    }
+
+#ifndef NDEBUG
+    for (size_t i = 0; i < n; ++i) {
+        assert(!regions[i].paths.empty());
+        for (const Polyline &pl : regions[i].paths)
+            assert(pl.points.size() >= 2);
+        for (size_t p : predecessors[i])
+            assert(p < n && p != i);
+    }
+#endif
+
+    std::vector<size_t> remaining(n, 0);
+    std::vector<std::vector<size_t>> successors(n);
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t p : predecessors[i]) {
+            if (p >= n || p == i)
+                continue;
+            ++remaining[i];
+            successors[p].push_back(i);
+        }
+    }
+
+    std::vector<size_t> ready;
+    ready.reserve(n);
+    for (size_t i = 0; i < n; ++i)
+        if (remaining[i] == 0)
+            ready.push_back(i);
+
+    std::vector<size_t> order;
+    order.reserve(n);
+    std::vector<char> done(n, 0);
+    Point current = start_near ? *start_near : Point(0, 0);
+    bool  have_current = start_near != nullptr;
+
+    auto pick = [&]() -> size_t {
+        size_t best_i = 0;
+        double best_d2 = std::numeric_limits<double>::max();
+        for (size_t k = 0; k < ready.size(); ++k) {
+            const size_t idx = ready[k];
+            const double d2  = have_current
+                ? (regions[idx].start() - current).cast<double>().squaredNorm()
+                : 0.;
+            // Stable index tie-break: lower region index wins on equal distance.
+            if (d2 < best_d2 || (d2 == best_d2 && idx < ready[best_i])) {
+                best_d2 = d2;
+                best_i  = k;
+            }
+        }
+        const size_t chosen = ready[best_i];
+        ready[best_i] = ready.back();
+        ready.pop_back();
+        return chosen;
+    };
+
+    while (order.size() < n) {
+        if (ready.empty()) {
+            // Predecessor graph bug (cycle or size mismatch). Fall back to
+            // original order for any remaining regions.
+            assert(false);
+            for (size_t i = 0; i < n; ++i)
+                if (!done[i])
+                    order.push_back(i);
+            break;
+        }
+        const size_t idx = pick();
+        order.push_back(idx);
+        done[idx] = 1;
+        current = regions[idx].end();
+        have_current = true;
+        for (size_t s : successors[idx]) {
+            if (remaining[s] == 0)
+                continue;
+            if (--remaining[s] == 0)
+                ready.push_back(s);
+        }
+    }
+    return order;
+}
+
+Polylines flatten_oriented_regions(
+    const std::vector<OrientedPathRegion> &regions,
+    const std::vector<size_t>             &order)
+{
+    Polylines out;
+    size_t n_paths = 0;
+    for (size_t i : order)
+        n_paths += regions[i].paths.size();
+    out.reserve(n_paths);
+    for (size_t i : order)
+        polylines_append(out, regions[i].paths);
     return out;
 }
 
