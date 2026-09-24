@@ -9,6 +9,7 @@
 #include "MinimumSpanningTree.hpp"
 #include "Print.hpp"
 #include "ShortestPath.hpp"
+#include "SawtoothInterface.hpp"
 #include "SupportCommon.hpp"
 #include "SVG.hpp"
 #include "TreeSupportCommon.hpp"
@@ -1549,6 +1550,9 @@ void TreeSupport::generate_toolpaths()
                         ExtrusionEntityCollection* temp_support_fills = new ExtrusionEntityCollection();
                         make_perimeter_and_infill(temp_support_fills->entities, poly, 1, interface_base_flow, interface_role,
                             filler_Roof1stLayer.get(), interface_density, false);
+                        // ORCA: sawtooth teeth, as for RoofType above.
+                        apply_sawtooth_teeth(temp_support_fills->entities, 0,
+                                             sawtooth_params(*m_object_config, interface_flow));
                         temp_support_fills->no_sort = true; // make sure loops are first
                         if (!temp_support_fills->entities.empty())
                             ts_layer->support_fills.entities.push_back(temp_support_fills);
@@ -1584,8 +1588,12 @@ void TreeSupport::generate_toolpaths()
 
                         Flow interface_base_flow = interface_as_base ? support_flow : interface_flow;
                         ExtrusionRole interface_role = interface_as_base ? erSupportMaterial : erSupportMaterialInterface;
+                        const size_t first_extrusion = ts_layer->support_fills.entities.size();
                         fill_expolygons_generate_paths(ts_layer->support_fills.entities, polys, filler_interface.get(), fill_params, interface_role,
                                                        interface_base_flow);
+                        // ORCA: roofs face up at the object, so they get the sawtooth teeth. Floors do not.
+                        apply_sawtooth_teeth(ts_layer->support_fills.entities, first_extrusion,
+                                             sawtooth_params(*m_object_config, interface_flow));
                     }
                     else {
                         // base_areas

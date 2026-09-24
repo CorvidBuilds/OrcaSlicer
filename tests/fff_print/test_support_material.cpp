@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
 
 #include "test_helpers.hpp" // get access to init_print, etc
@@ -103,4 +104,46 @@ TEST_CASE("Support G-code emission survives a second slice in the same process",
 
     const std::string second = slice({ TestMesh::overhang }, { { "enable_support", 1 } });
     REQUIRE(! layers_with_role(second, "support").empty());
+}
+
+// Sawtooth interfaces are ordinary rectilinear fills with a Z post-process, so the proof
+// that they took effect is a z_contoured interface path.
+static bool any_contoured_interface(const ExtrusionEntityCollection &coll)
+{
+    for (const ExtrusionEntity *e : coll.entities) {
+        if (const auto *path = dynamic_cast<const ExtrusionPath*>(e)) {
+            if (path->z_contoured && path->role() == erSupportMaterialInterface)
+                return true;
+        } else if (const auto *mp = dynamic_cast<const ExtrusionMultiPath*>(e)) {
+            for (const ExtrusionPath &path : mp->paths)
+                if (path.z_contoured && path.role() == erSupportMaterialInterface)
+                    return true;
+        } else if (const auto *child = dynamic_cast<const ExtrusionEntityCollection*>(e)) {
+            if (any_contoured_interface(*child))
+                return true;
+        }
+    }
+    return false;
+}
+
+static bool sliced_with_sawtooth_teeth(const std::string &top_z_distance)
+{
+    Slic3r::Print print;
+    Slic3r::Test::init_and_process_print({ TestMesh::overhang }, print, {
+        { "enable_support",                    "1" },
+        { "support_interface_top_layers",      "2" },
+        { "support_interface_pattern",         "sawtooth" },
+        { "support_top_z_distance",            top_z_distance }
+    });
+    for (const SupportLayer *layer : print.objects().front()->support_layers())
+        if (any_contoured_interface(layer->support_fills))
+            return true;
+    return false;
+}
+
+TEST_CASE("Sawtooth support interface emits Z-contoured paths", "[SupportMaterial]")
+{
+    REQUIRE(sliced_with_sawtooth_teeth("0.2"));
+    // No Z gap leaves nowhere for a tooth to hop into, so the feature is a no-op.
+    REQUIRE(! sliced_with_sawtooth_teeth("0"));
 }

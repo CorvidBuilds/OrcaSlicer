@@ -1102,6 +1102,7 @@ static std::vector<std::string> s_Preset_print_options{
     "support_interface_top_layers",
     "support_interface_bottom_layers",
     "support_interface_pattern",
+    "support_interface_tooth_height",
     "support_interface_spacing",
     "support_interface_loop_pattern",
     "support_top_z_distance",

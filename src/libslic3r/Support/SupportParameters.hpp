@@ -62,7 +62,9 @@ struct SupportParameters {
         this->support_material_interface_flow = Slic3r::support_material_interface_flow(&object, float(slicing_params.layer_height));
     	this->raft_interface_flow                = support_material_interface_flow;
 
-        this->ironing = object_config.support_ironing;
+        // ORCA: ironing would shear the sawtooth teeth off, so it is forced off for that pattern.
+        this->ironing = object_config.support_ironing &&
+                        object_config.support_interface_pattern != smipSawtooth;
         this->ironing_flow = support_material_interface_flow.with_height(support_material_interface_flow.height() * 0.01 * object_config.support_ironing_flow.value);
         this->ironing_spacing = object_config.support_ironing_spacing;
         this->ironing_pattern = object_config.support_ironing_pattern;
@@ -139,6 +141,9 @@ struct SupportParameters {
             this->zero_gap_interface_top : this->zero_gap_interface_bottom;
         if (object_config.support_interface_pattern == smipGrid)
             this->contact_fill_pattern = ipGrid;
+        else if (object_config.support_interface_pattern == smipSawtooth)
+            // ORCA: sawtooth is plain rectilinear geometry; the teeth are a post-process on the extrusions.
+            this->contact_fill_pattern = ipRectilinear;
         else if (object_config.support_interface_pattern == smipRectilinearInterlaced)
             this->contact_fill_pattern = ipRectilinear;
         else
@@ -297,6 +302,7 @@ struct SupportParameters {
             float angle;
             
             switch (this->support_interface_pattern) {
+                case SupportMaterialInterfacePattern::smipSawtooth:
                 case SupportMaterialInterfacePattern::smipRectilinear:
                     angle = support_style == SupportMaterialStyle::smsSnug ? this->interface_angle - float(M_PI_4) : this->interface_angle;
                     break;

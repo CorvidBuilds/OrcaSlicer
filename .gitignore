@@ -49,3 +49,6 @@ internal_docs/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Local reference copies of upstream/fork sources (not part of the build)
+/refs/

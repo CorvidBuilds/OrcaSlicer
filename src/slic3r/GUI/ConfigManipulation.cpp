@@ -888,6 +888,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
         "support_type", "support_on_build_plate_only", "support_critical_regions_only", "support_interface_not_for_body",
         "support_object_xy_distance", "support_object_first_layer_gap", "independent_support_layer_height"})
         toggle_field(el, have_support_material);
+    // ORCA: the tooth height only means anything for the sawtooth interface pattern.
+    toggle_field("support_interface_tooth_height", have_support_material &&
+        config->opt_enum<SupportMaterialInterfacePattern>("support_interface_pattern") == smipSawtooth);
     toggle_field("support_threshold_angle", have_support_material && is_auto(support_type));
     toggle_field("support_threshold_overlap", config->opt_int("support_threshold_angle") == 0 && have_support_material && is_auto(support_type));
     //toggle_field("support_closing_radius", have_support_material && support_style == smsSnug);

@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <tbb/parallel_for.h>
 
+#include "SawtoothInterface.hpp"
 #include "SupportCommon.hpp"
 #include "SupportLayer.hpp"
 #include "SupportParameters.hpp"
@@ -1747,6 +1748,7 @@ void generate_support_toolpaths(
                     filler->spacing = raft_contact ? support_params.raft_interface_flow.spacing() :
                         interface_as_base ? support_params.support_material_flow.spacing() : support_params.support_material_interface_flow.spacing();
                     filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
+                    const size_t first_extrusion = layer_ex.extrusions.size();
                     fill_expolygons_generate_paths(
                         // Destination
                         layer_ex.extrusions,
@@ -1756,6 +1758,12 @@ void generate_support_toolpaths(
                         filler, float(density),
                         // Extrusion parameters
                         interface_as_base ? ExtrusionRole::erSupportMaterial : ExtrusionRole::erSupportMaterialInterface, interface_flow);
+                    // ORCA: sawtooth teeth only on interfaces that face up at the object.
+                    // Bottom contacts, raft contacts and interface-as-base are excluded.
+                    if (interface_layer_type == InterfaceLayerType::TopContact ||
+                        (interface_layer_type == InterfaceLayerType::Interface && ! bottom_interface))
+                        apply_sawtooth_teeth(layer_ex.extrusions, first_extrusion,
+                                             sawtooth_params(config, support_params.support_material_interface_flow));
                 }
             };
             extrude_interface(top_contact_layer,    raft_layer ? InterfaceLayerType::RaftContact : top_interfaces ? InterfaceLayerType::TopContact : InterfaceLayerType::InterfaceAsBase);

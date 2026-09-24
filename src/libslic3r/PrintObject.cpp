@@ -1298,6 +1298,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_interface_top_layers"
             || opt_key == "support_interface_bottom_layers"
             || opt_key == "support_interface_pattern"
+            || opt_key == "support_interface_tooth_height"
             || opt_key == "support_interface_loop_pattern"
             || opt_key == "support_interface_filament"
             || opt_key == "support_interface_not_for_body"
